@@ -319,8 +319,8 @@ You should have received a copy of the **GNU Affero General Public License** alo
 
 For questions, support, or feature requests:
 
--   🐛 **Issues**: [GitHub Issues](https://github.com/proxmox-iscsi-snapshots/issues)
--   💬 **Discussions**: [GitHub Discussions](https://github.com/proxmox-iscsi-snapshots/discussions)
+-   🐛 **Issues**: [GitHub Issues](https://github.com/MrMasterbay/proxmox-iscsi-snapshots/issues)
+-   💬 **Discussions**: [Discord Coming Soon]
 -   📧 **Contact**: <nico.schmidt@ns-tech.cloud>
 
 ### Follow Development
