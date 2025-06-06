@@ -17,11 +17,11 @@ A comprehensive snapshot management solution for Proxmox VE that supports both v
 - **Cluster Operations**: Full multi-node Proxmox cluster support with SSH automation
 
 ### **Atomic Snapshot Creation:**
-- ** Phase 1: Lightning-fast preparation (parallel validation)
-- ** Phase 2: Minimal downtime approach (freeze/suspend)
-- ** Phase 3: Parallel snapshot creation (all disks simultaneously)
-- ** Phase 4: Immediate restore (fastest resume)
-- ** Phase 5: Fast metadata (consistent timestamps)
+- **Phase 1: Lightning-fast preparation (parallel validation)
+- **Phase 2: Minimal downtime approach (freeze/suspend)
+- **Phase 3: Parallel snapshot creation (all disks simultaneously)
+- **Phase 4: Immediate restore (fastest resume)
+- **Phase 5: Fast metadata (consistent timestamps)
 
 ### Snapshot Operations
 - **Create Snapshots**: Intelligent snapshot creation with automatic size calculation
