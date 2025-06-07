@@ -222,7 +222,7 @@ The script uses 6 different methods to detect VM vs Container:
 | Modus | Downtime | Atomicity | Speed | Rollback |
 | --- | --- | --- | --- | --- |
 | --atomic automatic | <100μs Best Effort Atomic | NO Best Effort Approach | ~3s Production | Automatic |
-| --fast | ~1-3s Near-atomic | ~3s Production | No | ~2s Manually |
+| --fast | ~1-3s Near-atomic | No | ~3s Production | ~2s Manually |
 
 🐛 Troubleshooting
 ------------------
