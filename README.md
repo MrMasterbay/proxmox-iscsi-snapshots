@@ -257,7 +257,19 @@ Setup SSH keys for cluster communication:
 🔄 Changelog
 ------------
 
+### 07.06.2025 Changelog
 
+## 🔥 **Smaller Improvement:**
+ "Near-Atomic" / "Best-Effort Atomic":
+
+  Pre-flight validation: All checks before VM contact
+  Parallel COW creation: Simultaneous snapshot creation
+  Microsecond commit: <100μs for metadata update
+  Transaction rollback: Cleanup in case of errors
+  Consistent timestamps: All snapshots have the same time
+
+
+***
 ### 6.06.2025 Changelog
 
 ### 🔥 **Major Improvements:**
@@ -434,7 +446,7 @@ Compression yes
 - **Enterprise-grade error handling**
 
 
-
+***
 ### 4.06.2025
 
 ### Major Enhancements Added
