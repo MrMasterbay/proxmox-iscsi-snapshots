@@ -108,6 +108,12 @@ A comprehensive snapshot management solution for Proxmox VE that supports both v
 -   `--non-interactive`: Skip all prompts (for automated execution)
 -   `--interactive`: Force interactive mode even for remote execution
 
+### Best Effort Atomic consistency options
+
+-   `--atomic`: Enable Best Effort atomic mode (default, <100μs downtime)
+-   `--fast`: Use fast parallel mode (legacy, ~3s downtime)
+-   `--test-atomic`: Test best effort atomic consistency after operation
+
 #### Cluster Options
 
 -   `--force-local`: Force local-only operation (skip cluster coordination)
