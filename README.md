@@ -285,7 +285,7 @@ Setup SSH keys for cluster communication:
 
 ## 🔒 **Atomic Consistency & Reliability**
 
-### **Atomic Snapshot Creation:**
+### **Best Effort Atomic Snapshot Creation:**
 ```
 Phase 1: Lightning-fast preparation (parallel validation)
 Phase 2: Minimal downtime approach (freeze/suspend)
