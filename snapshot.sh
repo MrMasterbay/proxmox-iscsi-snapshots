@@ -32,7 +32,7 @@ FORCE_INTERACTIVE="false"
 DEBUG_MODE="false"
 CONTAINER_MODE="false"
 SHOW_BANNER="true"
-ATOMIC_MODE="true"  # NEW: Enable true atomic mode by default
+ATOMIC_MODE="true"  # NEW: Enable best effort atomic mode by default
 TEST_ATOMIC="false"
 
 # Debug function
@@ -860,7 +860,7 @@ get_thin_pool() {
 }
 
 # ============================================================================
-# TRUE ATOMIC IMPLEMENTATION - NEW FUNCTIONS
+# BEST EFFORT ATOMIC IMPLEMENTATION - NEW FUNCTIONS
 # ============================================================================
 
 # Phase 0: Comprehensive pre-validation with zero downtime
@@ -1284,7 +1284,7 @@ test_atomic_consistency() {
         return 0
     else
         echo "❌ ATOMIC VIOLATION: Partial snapshots ($actual_snapshots/$expected_disks)"
-        echo "This should NEVER happen with TRUE atomic mode!"
+        echo "This should NEVER happen with best effort atomic mode!"
         return 1
     fi
 }
@@ -2200,7 +2200,7 @@ instance_snapshot_create() {
     
     # Choose atomic or fast mode
     if [ "$ATOMIC_MODE" = "true" ]; then
-        # Use TRUE atomic implementation
+        # Use best effort atomic implementation
         instance_snapshot_create_true_atomic "$id" "$snapshotname" "$is_container"
     else
         # Use legacy fast parallel implementation
