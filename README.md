@@ -262,11 +262,11 @@ Setup SSH keys for cluster communication:
 ## 🔥 **Smaller Improvement:**
  "Near-Atomic" / "Best-Effort Atomic":
 
-  Pre-flight validation: All checks before VM contact
-  Parallel COW creation: Simultaneous snapshot creation
-  Microsecond commit: <100μs for metadata update
-  Transaction rollback: Cleanup in case of errors
-  Consistent timestamps: All snapshots have the same time
+  - Pre-flight validation: All checks before VM contact
+  - Parallel COW creation: Simultaneous snapshot creation
+  - Microsecond commit: <100μs for metadata update
+  - Transaction rollback: Cleanup in case of errors
+  - Consistent timestamps: All snapshots have the same time
 
 
 ***
