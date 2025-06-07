@@ -219,6 +219,15 @@ The script uses 6 different methods to detect VM vs Container:
 | **Downtime** | ~5s | ~0.5s | **10x less** |
 | **SSH Connection** | ~2s | ~0.2s | **10x faster** |
 
+| **Modus** | **Downtime** | **Atomicity** | **Speed** | **Rollback** |
+| **--atomic automatic** |	**<100μs Best Effort Atomic** | **NO Best Effort Approach**	| **~3s	Production** | **Automatic** |
+| **--fast** |	**~1-3s	Near-atomic** |	**~3s	Production** | **No**	| **~2s** | **Manually** |**
+
+📊 Performance Comparison:
+Mode	Downtime	Atomicity	Speed	Use Case
+--atomic	<100μs	TRUE	~3s	Production
+--fast	~1-3s	Near-atomic	~2s	Development**
+
 
 🐛 Troubleshooting
 ------------------
