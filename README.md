@@ -16,7 +16,7 @@ A comprehensive snapshot management solution for Proxmox VE that supports both v
   - Automatic thin/thick detection
 - **Cluster Operations**: Full multi-node Proxmox cluster support with SSH automation
 
-### **Atomic Snapshot Creation:**
+### **Best Try of Atomic Snapshot Creation:**
 - **Phase 1**: Lightning-fast preparation (parallel validation)
 - **Phase 2**: Minimal downtime approach (freeze/suspend)
 - **Phase 3**: Parallel snapshot creation (all disks simultaneously)
