@@ -267,7 +267,7 @@ Setup SSH keys for cluster communication:
 ## ⚡ **Performance Optimizations (6x faster)**
 
 ### **Ultra-Fast Snapshot Creation:**
-- **Atomic Consistency**: 5-phase process with <1s downtime
+- **Best Effort Atomic Consistency**: 5-phase process with <1s downtime
 - **Parallel Processing**: Simultaneous snapshot creation for all disks
 - **Filesystem Freeze**: QEMU Guest Agent integration for sub-second downtime
 - **Smart Sizing**: Intelligent snapshot size calculation
@@ -283,7 +283,7 @@ Setup SSH keys for cluster communication:
 
 ---
 
-## 🔒 **Atomic Consistency & Reliability**
+## 🔒 **Best Effort Atomic Consistency & Reliability**
 
 ### **Best Effort Atomic Snapshot Creation:**
 ```
@@ -427,7 +427,7 @@ Compression yes
 **From a simple snapshot tool to an enterprise-grade, ultra-fast cluster manager with atomic consistency!**
 
 - **6x faster performance** 
-- **Atomic Consistency** (All-or-Nothing)
+- **Best Effort Atomic Consistency** (All-or-Nothing)
 - **<1s downtime** for VMs with Guest Agent
 - **4x faster remote execution**
 - **Intelligent caching systems**
