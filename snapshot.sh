@@ -1,14 +1,14 @@
-#!/bin/sh
+#!/bin/bash
 #
 #
 # Enhanced Proxmox LVM Snapshot Manager with LXC Container Support
-# Ultra-Fast Version with Near-Atomic Coordinated Creation + Remote Speed Optimization
+# Ultra-Fast Version with Best-Effort Atomic Creation + Intelligent Storage Sizing
 # 
-# Prerequesties on all PVE nodes :
+# Prerequisites on all PVE nodes:
 #  
 # in etc/lvm/lvm.conf
 #
-# enable settings :
+# enable settings:
 #
 #         snapshot_autoextend_threshold = 70
 #         snapshot_autoextend_percent = 20
@@ -32,8 +32,13 @@ FORCE_INTERACTIVE="false"
 DEBUG_MODE="false"
 CONTAINER_MODE="false"
 SHOW_BANNER="true"
-ATOMIC_MODE="true"  # NEW: Enable best effort atomic mode by default
+ATOMIC_MODE="true"  # Enable best effort atomic mode by default
 TEST_ATOMIC="false"
+
+# Storage optimization settings
+UNIVERSAL_SIZING="true"
+ADAPTIVE_ALGORITHMS="true"
+STORAGE_LEARNING="true"
 
 # Debug function
 debug() {
@@ -50,11 +55,11 @@ show_support_message() {
     fi
     
     echo "============================================================================"
-    echo "  Enhanced Proxmox LVM Snapshot Manager - Best-Effort Coordinated Creation"
+    echo "  Enhanced Proxmox LVM Snapshot Manager - Best-Effort Atomic + Smart Sizing"
     echo "  Remastered by Nico Schmidt (baGStube_Nico)"
     echo ""
     echo "  Supports: QEMU VMs and LXC Containers"
-    echo "  Features: Best-Effort Atomic Consistency + <100μs Downtime + Remote Speed"
+    echo "  Features: Best-Effort Atomic + <100μs Downtime + Intelligent Sizing"
     echo ""
     echo "  Please consider supporting this script development:"
     echo "  💖 Ko-fi: ko-fi.com/bagstube_nico"
@@ -140,6 +145,9 @@ usage() {
     echo "  --fast       : Use fast parallel mode (legacy, ~3s downtime)"
     echo "  --test-atomic : Test atomic consistency after operation"
     echo ""
+    echo "Storage optimization options:"
+    echo "  --no-size-opt : Disable intelligent sizing (use default sizes)"
+    echo ""
     echo "Cluster options:"
     echo "  --force-local : Force local-only operation (skip cluster coordination)"
     echo "  --cluster-sync : Force cluster synchronization even for local VMs/CTs"
@@ -150,6 +158,409 @@ usage() {
     echo ""
     echo "Internal options (used by script):"
     echo "  --no-banner : Suppress support banner (used for remote execution)"
+}
+
+# ============================================================================
+# UNIVERSAL STORAGE-AGNOSTIC INTELLIGENT SIZING SYSTEM
+# ============================================================================
+
+# Universal storage analysis without protocol detection
+analyze_storage_characteristics() {
+    local device_path="$1"
+    
+    debug "Analyzing storage characteristics for $device_path"
+    
+    characteristics_info="/tmp/storage_characteristics_$$"
+    
+    # Get basic device information
+    device_name=$(basename "$device_path")
+    
+    # Performance characteristics
+    echo "device_name=$device_name" > "$characteristics_info"
+    
+    # Check if rotational (affects sizing strategy)
+    if [ -f "/sys/block/$device_name/queue/rotational" ]; then
+        rotational=$(cat "/sys/block/$device_name/queue/rotational")
+        echo "rotational=$rotational" >> "$characteristics_info"
+    else
+        echo "rotational=unknown" >> "$characteristics_info"
+    fi
+    
+    # Get current queue depth (indicates device capabilities)
+    if [ -f "/sys/block/$device_name/queue/nr_requests" ]; then
+        queue_depth=$(cat "/sys/block/$device_name/queue/nr_requests")
+        echo "queue_depth=$queue_depth" >> "$characteristics_info"
+    fi
+    
+    # Quick performance sampling
+    if command -v hdparm >/dev/null 2>&1; then
+        performance_sample=$(timeout 3 hdparm -t "$device_path" 2>/dev/null | grep "Timing" | grep -o '[0-9.]\+ MB/sec' | head -1)
+        if [ -n "$performance_sample" ]; then
+            throughput=$(echo "$performance_sample" | sed 's/ MB\/sec//')
+            echo "throughput_sample=$throughput" >> "$characteristics_info"
+        fi
+    fi
+    
+    # Check if device appears to be network-attached (affects sizing)
+    check_network_characteristics "$device_path" "$characteristics_info"
+    
+    echo "$characteristics_info"
+}
+
+# Check for network storage characteristics without naming protocols
+check_network_characteristics() {
+    local device_path="$1"
+    local characteristics_info="$2"
+    
+    # Look for indicators of network storage (without naming specific protocols)
+    network_indicators=0
+    
+    # Check for active network storage sessions
+    if command -v iscsiadm >/dev/null 2>&1; then
+        if iscsiadm -m session 2>/dev/null | grep -q "tcp"; then
+            network_indicators=$((network_indicators + 1))
+        fi
+    fi
+    
+    # Check for device mapper complexity (often indicates enterprise storage)
+    device_name=$(basename "$device_path")
+    if [ -e "/dev/mapper/$device_name" ]; then
+        if command -v multipath >/dev/null 2>&1; then
+            if multipath -l 2>/dev/null | grep -q "$device_name"; then
+                network_indicators=$((network_indicators + 1))
+            fi
+        fi
+    fi
+    
+    # Check for network filesystem mounts
+    if mount | grep -q "nfs\|cifs\|smb"; then
+        mount_info=$(mount | grep "$(dirname "$device_path")")
+        if [ -n "$mount_info" ]; then
+            network_indicators=$((network_indicators + 1))
+        fi
+    fi
+    
+    if [ "$network_indicators" -gt 0 ]; then
+        echo "network_characteristics=detected" >> "$characteristics_info"
+        debug "Network storage characteristics detected"
+    else
+        echo "network_characteristics=local" >> "$characteristics_info"
+        debug "Local storage characteristics detected"
+    fi
+}
+
+# Universal optimal size calculation
+calculate_universal_optimal_size() {
+    local device_path="$1"
+    local vm_id="$2"
+    local is_container="$3"
+    
+    debug "Calculating universal optimal size for $device_path"
+    
+    # Analyze storage characteristics
+    characteristics_info=$(analyze_storage_characteristics "$device_path")
+    
+    if [ ! -f "$characteristics_info" ]; then
+        debug "Characteristics analysis failed, using fallback"
+        echo "4G"
+        return
+    fi
+    
+    # Load characteristics
+    eval $(cat "$characteristics_info")
+    
+    # Get storage usage information
+    storage_stats=$(analyze_universal_storage_usage "$device_path" "$vm_id")
+    
+    if [ -f "$storage_stats" ]; then
+        eval $(cat "$storage_stats")
+    fi
+    
+    # Calculate base size using universal algorithm
+    if [ -n "$total_bytes" ] && [ -n "$usage_percent" ]; then
+        total_gb=$(echo "scale=2; $total_bytes / 1024 / 1024 / 1024" | bc)
+        used_gb=$(echo "scale=2; $total_gb * $usage_percent / 100" | bc)
+        
+        debug "Storage analysis: Total=${total_gb}G, Used=${used_gb}G, Usage=${usage_percent}%"
+        
+        # Universal sizing algorithm based on characteristics - OPTIMIZED FOR MINIMAL SPACE
+        
+        # Base multiplier depends on device characteristics - MUCH SMALLER VALUES
+        if [ "$rotational" = "0" ]; then
+            # Solid state storage - use very small snapshots
+            base_multiplier="0.08"  # 8% of used space
+            debug "Solid state storage: using minimal multiplier $base_multiplier"
+        elif [ "$rotational" = "1" ]; then
+            # Rotational storage - slightly larger for efficiency
+            base_multiplier="0.12"  # 12% of used space
+            debug "Rotational storage: using minimal multiplier $base_multiplier"
+        else
+            # Unknown type - conservative but still minimal
+            base_multiplier="0.10"  # 10% of used space
+            debug "Unknown storage type: using minimal multiplier $base_multiplier"
+        fi
+        
+        optimal_size=$(echo "scale=2; $used_gb * $base_multiplier" | bc)
+        
+        # Adjust based on performance characteristics
+        if [ -n "$throughput_sample" ]; then
+            if [ "$(echo "$throughput_sample > 300" | bc 2>/dev/null || echo 0)" = "1" ]; then
+                # High performance storage - can be even more efficient
+                optimal_size=$(echo "scale=2; $optimal_size * 0.8" | bc)
+                debug "High performance adjustment applied: ${optimal_size}G"
+            elif [ "$(echo "$throughput_sample < 50" | bc 2>/dev/null || echo 0)" = "1" ]; then
+                # Lower performance storage - minimal increase
+                optimal_size=$(echo "scale=2; $optimal_size * 1.1" | bc)
+                debug "Lower performance adjustment applied: ${optimal_size}G"
+            fi
+        fi
+        
+        # Network characteristics adjustment - minimal buffer
+        if [ "$network_characteristics" = "detected" ]; then
+            # Network storage - small buffer for network variability
+            optimal_size=$(echo "scale=2; $optimal_size * 1.15" | bc)
+            debug "Network storage buffer applied: ${optimal_size}G"
+        fi
+        
+        # Queue depth adjustment (indicates device sophistication)
+        if [ -n "$queue_depth" ]; then
+            if [ "$queue_depth" -gt 128 ]; then
+                # High queue depth - sophisticated storage, can be more efficient
+                optimal_size=$(echo "scale=2; $optimal_size * 0.9" | bc)
+                debug "High queue depth optimization applied: ${optimal_size}G"
+            elif [ "$queue_depth" -lt 32 ]; then
+                # Low queue depth - minimal adjustment
+                optimal_size=$(echo "scale=2; $optimal_size * 1.05" | bc)
+                debug "Low queue depth adjustment applied: ${optimal_size}G"
+            fi
+        fi
+        
+        # Container vs VM adjustment
+        if [ "$is_container" = "true" ]; then
+            # Containers typically need even less space
+            optimal_size=$(echo "scale=2; $optimal_size * 0.7" | bc)
+            debug "Container adjustment applied: ${optimal_size}G"
+        fi
+        
+        # Apply historical learning
+        apply_historical_learning "$device_path" "$optimal_size" "$characteristics_info"
+        if grep -q "learned_size" "$characteristics_info"; then
+            learned_size=$(grep "learned_size" "$characteristics_info" | cut -d'=' -f2)
+            # Only use learned size if it's smaller or reasonably close
+            if [ "$(echo "$learned_size < $optimal_size * 1.2" | bc)" = "1" ]; then
+                optimal_size="$learned_size"
+                debug "Applied historical learning: ${optimal_size}G"
+            fi
+        fi
+        
+        # Universal size boundaries - VERY CONSERVATIVE
+        min_size="1"    # Absolute minimum 1GB
+        max_size=$(echo "scale=2; $total_gb * 0.15" | bc)  # Never more than 15% of total
+        
+        if [ "$(echo "$optimal_size < $min_size" | bc)" = "1" ]; then
+            optimal_size="$min_size"
+            debug "Applied minimum size: ${optimal_size}G"
+        elif [ "$(echo "$optimal_size > $max_size" | bc)" = "1" ]; then
+            optimal_size="$max_size"
+            debug "Applied maximum size limit: ${optimal_size}G"
+        fi
+        
+        # Round to efficient increments
+        optimal_size_rounded=$(round_to_efficient_increment "$optimal_size" "$rotational" "$network_characteristics")
+        
+        echo "${optimal_size_rounded}G"
+        debug "Final optimized size: ${optimal_size_rounded}G"
+        
+    else
+        debug "Insufficient storage data, using intelligent fallback"
+        echo $(get_intelligent_fallback_size "$device_path" "$rotational" "$network_characteristics")
+    fi
+    
+    # Cleanup
+    rm -f "$characteristics_info" "$storage_stats"
+}
+
+# Universal storage usage analysis
+analyze_universal_storage_usage() {
+    local device_path="$1"
+    local vm_id="$2"
+    
+    usage_stats="/tmp/universal_usage_$$"
+    
+    # Method 1: LVM analysis
+    if lvs "$device_path" >/dev/null 2>&1; then
+        lv_info=$(lvs --noheadings -o lv_size,data_percent,pool_lv "$device_path" 2>/dev/null)
+        if [ -n "$lv_info" ]; then
+            lv_size=$(echo "$lv_info" | awk '{print $1}' | tr -d ' ')
+            data_percent=$(echo "$lv_info" | awk '{print $2}' | tr -d ' ')
+            
+            # Convert to bytes
+            total_bytes=$(convert_size_to_bytes "$lv_size")
+            
+            if [ -n "$data_percent" ] && [ "$data_percent" != "" ]; then
+                usage_percent=$(echo "$data_percent" | sed 's/%//')
+            else
+                usage_percent=25  # Conservative estimate for minimal sizing
+            fi
+            
+            echo "total_bytes=$total_bytes" > "$usage_stats"
+            echo "usage_percent=$usage_percent" >> "$usage_stats"
+            echo "analysis_method=lvm" >> "$usage_stats"
+            
+            debug "LVM analysis: Size=$lv_size, Usage=${usage_percent}%"
+        fi
+    fi
+    
+    # Method 2: Block device analysis
+    if [ ! -f "$usage_stats" ]; then
+        total_bytes=$(blockdev --getsize64 "$device_path" 2>/dev/null)
+        if [ -n "$total_bytes" ]; then
+            usage_percent=25  # Conservative estimate for minimal sizing
+            
+            echo "total_bytes=$total_bytes" > "$usage_stats"
+            echo "usage_percent=$usage_percent" >> "$usage_stats"
+            echo "analysis_method=blockdev" >> "$usage_stats"
+            
+            debug "Block device analysis: ${total_bytes} bytes, estimated ${usage_percent}% usage"
+        fi
+    fi
+    
+    echo "$usage_stats"
+}
+
+# Convert size string to bytes
+convert_size_to_bytes() {
+    local size_str="$1"
+    
+    size_value=$(echo "$size_str" | sed 's/[^0-9.]//g')
+    size_unit=$(echo "$size_str" | sed 's/[0-9.]//g' | tr '[:lower:]' '[:upper:]')
+    
+    case "$size_unit" in
+        "B"|"") echo "$size_value" ;;
+        "K"|"KB") echo "$size_value * 1024" | bc ;;
+        "M"|"MB") echo "$size_value * 1024 * 1024" | bc ;;
+        "G"|"GB") echo "$size_value * 1024 * 1024 * 1024" | bc ;;
+        "T"|"TB") echo "$size_value * 1024 * 1024 * 1024 * 1024" | bc ;;
+        *) echo "$size_value * 1024 * 1024 * 1024" | bc ;;  # Default to GB
+    esac
+}
+
+# Get intelligent fallback size - MINIMAL SIZES
+get_intelligent_fallback_size() {
+    local device_path="$1"
+    local rotational="$2"
+    local network_characteristics="$3"
+    
+    device_size=$(blockdev --getsize64 "$device_path" 2>/dev/null)
+    if [ -n "$device_size" ]; then
+        device_gb=$(echo "scale=0; $device_size / 1024 / 1024 / 1024" | bc)
+        
+        # Base fallback size calculation - VERY SMALL
+        if [ "$device_gb" -lt 10 ]; then
+            base_size="1"
+        elif [ "$device_gb" -lt 50 ]; then
+            base_size="2"
+        elif [ "$device_gb" -lt 200 ]; then
+            base_size="4"
+        else
+            base_size=$(echo "scale=0; $device_gb * 0.03" | bc)  # 3% of total
+        fi
+        
+        # Adjust based on characteristics
+        if [ "$rotational" = "1" ]; then
+            # Rotational storage - slightly larger
+            adjusted_size=$(echo "$base_size * 1.2" | bc)
+        elif [ "$network_characteristics" = "detected" ]; then
+            # Network storage - small buffer
+            adjusted_size=$(echo "$base_size * 1.3" | bc)
+        else
+            adjusted_size="$base_size"
+        fi
+        
+        rounded_size=$(round_to_efficient_increment "$adjusted_size" "$rotational" "$network_characteristics")
+        echo "${rounded_size}G"
+    else
+        echo "2G"  # Ultimate fallback
+    fi
+}
+
+# Round to efficient increments based on characteristics - SMALL INCREMENTS
+round_to_efficient_increment() {
+    local size="$1"
+    local rotational="$2"
+    local network_characteristics="$3"
+    
+    size_int=$(echo "$size" | awk '{printf "%.0f", $1}')
+    
+    # Choose increment strategy based on storage characteristics - MINIMAL INCREMENTS
+    if [ "$network_characteristics" = "detected" ]; then
+        # Network storage: Round to small multiples
+        if [ "$size_int" -le 1 ]; then echo "1"
+        elif [ "$size_int" -le 2 ]; then echo "2"
+        elif [ "$size_int" -le 3 ]; then echo "3"
+        elif [ "$size_int" -le 4 ]; then echo "4"
+        elif [ "$size_int" -le 6 ]; then echo "6"
+        elif [ "$size_int" -le 8 ]; then echo "8"
+        else echo $(( ((size_int + 3) / 4) * 4 )); fi
+    elif [ "$rotational" = "1" ]; then
+        # Rotational storage: Slightly larger increments for efficiency
+        if [ "$size_int" -le 2 ]; then echo "2"
+        elif [ "$size_int" -le 4 ]; then echo "4"
+        elif [ "$size_int" -le 6 ]; then echo "6"
+        elif [ "$size_int" -le 8 ]; then echo "8"
+        elif [ "$size_int" -le 12 ]; then echo "12"
+        else echo $(( ((size_int + 3) / 4) * 4 )); fi
+    else
+        # Solid state storage: Smallest increments
+        if [ "$size_int" -le 1 ]; then echo "1"
+        elif [ "$size_int" -le 2 ]; then echo "2"
+        elif [ "$size_int" -le 3 ]; then echo "3"
+        elif [ "$size_int" -le 4 ]; then echo "4"
+        elif [ "$size_int" -le 6 ]; then echo "6"
+        else echo $(( ((size_int + 1) / 2) * 2 )); fi
+    fi
+}
+
+# Apply historical learning from existing snapshots
+apply_historical_learning() {
+    local device_path="$1"
+    local current_calc="$2"
+    local characteristics_info="$3"
+    
+    device_name=$(basename "$device_path")
+    existing_snapshots=$(lvs 2>/dev/null | grep "$device_name" | grep snapshot | tail -5)
+    
+    if [ -n "$existing_snapshots" ]; then
+        total_size=0
+        count=0
+        
+        echo "$existing_snapshots" | while read -r snap_line; do
+            snap_size=$(echo "$snap_line" | awk '{print $4}')
+            if [ -n "$snap_size" ]; then
+                size_gb=$(convert_size_to_bytes "$snap_size")
+                size_gb=$(echo "scale=2; $size_gb / 1024 / 1024 / 1024" | bc)
+                
+                total_size=$(echo "$total_size + $size_gb" | bc)
+                count=$((count + 1))
+            fi
+        done
+        
+        if [ "$count" -gt 2 ]; then
+            avg_size=$(echo "scale=2; $total_size / $count" | bc)
+            # Use learned size if it's smaller (prefer efficiency)
+            min_learned=$(echo "scale=2; $current_calc * 0.5" | bc)
+            max_learned=$(echo "scale=2; $current_calc * 1.5" | bc)
+            
+            if [ "$(echo "$avg_size >= $min_learned && $avg_size <= $max_learned" | bc)" = "1" ]; then
+                # Use smaller of learned or calculated
+                if [ "$(echo "$avg_size < $current_calc" | bc)" = "1" ]; then
+                    learned_with_buffer=$(echo "scale=2; $avg_size * 1.05" | bc)  # Minimal 5% buffer
+                    echo "learned_size=$learned_with_buffer" >> "$characteristics_info"
+                    debug "Applied historical learning (smaller): ${learned_with_buffer}G (from $count snapshots)"
+                fi
+            fi
+        fi
+    fi
 }
 
 # Lightning-fast detection using cache
@@ -254,7 +665,7 @@ detect_container_or_vm() {
         fi
     fi
     
-    # Method 5: Check other cluster nodes if in cluster mode
+    # Method 5: Check other cluster nodes if in cluster mode - FIXED!
     if [ "$CLUSTER_MODE" = "true" ]; then
         debug "Method 5: Checking other cluster nodes"
         for node in $CLUSTER_NODES; do
@@ -262,35 +673,41 @@ detect_container_or_vm() {
                 debug "Checking node $node for instance $id"
                 if test_ssh_connection_fast "$node"; then
                     # Check for container config
-                    if ssh "root@${node}" "test -f /etc/pve/lxc/${id}.conf" 2>/dev/null; then
+                    debug "Testing container config on $node"
+                    if ssh -o ConnectTimeout=5 -o ControlMaster=auto -o ControlPath="/tmp/ssh_control_%h_%p_%r" "root@${node}" "test -f /etc/pve/lxc/${id}.conf" 2>/dev/null; then
                         debug "Found container config on node $node"
                         return 0  # Container
                     fi
                     
                     # Check for VM config  
-                    if ssh "root@${node}" "test -f /etc/pve/qemu-server/${id}.conf" 2>/dev/null; then
+                    debug "Testing VM config on $node"
+                    if ssh -o ConnectTimeout=5 -o ControlMaster=auto -o ControlPath="/tmp/ssh_control_%h_%p_%r" "root@${node}" "test -f /etc/pve/qemu-server/${id}.conf" 2>/dev/null; then
                         debug "Found VM config on node $node"
                         return 1  # VM
                     fi
                     
                     # Try status commands on remote node
-                    if ssh "root@${node}" "pct status $id >/dev/null 2>&1"; then
+                    debug "Testing pct status on $node"
+                    if ssh -o ConnectTimeout=5 -o ControlMaster=auto -o ControlPath="/tmp/ssh_control_%h_%p_%r" "root@${node}" "pct status $id >/dev/null 2>&1" 2>/dev/null; then
                         debug "pct status succeeded on node $node"
                         return 0  # Container
                     fi
                     
-                    if ssh "root@${node}" "qm status $id >/dev/null 2>&1"; then
+                    debug "Testing qm status on $node"
+                    if ssh -o ConnectTimeout=5 -o ControlMaster=auto -o ControlPath="/tmp/ssh_control_%h_%p_%r" "root@${node}" "qm status $id >/dev/null 2>&1" 2>/dev/null; then
                         debug "qm status succeeded on node $node"
                         return 1  # VM
                     fi
                     
                     # Try list commands on remote node
-                    if ssh "root@${node}" "pct list 2>/dev/null | grep -q '^[[:space:]]*$id[[:space:]]'"; then
+                    debug "Testing pct list on $node"
+                    if ssh -o ConnectTimeout=5 -o ControlMaster=auto -o ControlPath="/tmp/ssh_control_%h_%p_%r" "root@${node}" "pct list 2>/dev/null | grep -q '^[[:space:]]*$id[[:space:]]'" 2>/dev/null; then
                         debug "Found $id in pct list on node $node"
                         return 0  # Container
                     fi
                     
-                    if ssh "root@${node}" "qm list 2>/dev/null | grep -q '^[[:space:]]*$id[[:space:]]'"; then
+                    debug "Testing qm list on $node"
+                    if ssh -o ConnectTimeout=5 -o ControlMaster=auto -o ControlPath="/tmp/ssh_control_%h_%p_%r" "root@${node}" "qm list 2>/dev/null | grep -q '^[[:space:]]*$id[[:space:]]'" 2>/dev/null; then
                         debug "Found $id in qm list on node $node"
                         return 1  # VM
                     fi
@@ -860,7 +1277,7 @@ get_thin_pool() {
 }
 
 # ============================================================================
-# BEST EFFORT ATOMIC IMPLEMENTATION - NEW FUNCTIONS
+# BEST EFFORT ATOMIC IMPLEMENTATION
 # ============================================================================
 
 # Phase 0: Comprehensive pre-validation with zero downtime
@@ -875,19 +1292,34 @@ atomic_pre_flight_validation() {
     # Get disks without any VM interaction
     disks=$(instance_list_disks_fast "$id" "$is_container")
     if [ -z "$disks" ]; then
-        echo "❌ No disks found"
+        echo "❌ No disks found for instance $id"
+        debug "No disks found during pre-flight validation"
         return 1
     fi
     
+    debug "Found disks for validation: $disks"
+    
     # Validate EVERYTHING before touching the VM
     temp_validation="/tmp/atomic_validation_$$"
+    > "$temp_validation"
     
     echo "$disks" | while IFS= read -r line; do
         if [ -z "$line" ]; then continue; fi
         
+        debug "Validating disk line: $line"
+        
         device_path=$(echo "$line" | awk -F ',' '{print $NF}')
-        if [ -z "$device_path" ] || [ ! -e "$device_path" ]; then
+        debug "Extracted device path: '$device_path'"
+        
+        if [ -z "$device_path" ]; then
+            echo "INVALID_PATH:empty_path_from_line:$line" >> "$temp_validation"
+            debug "Empty device path from line: $line"
+            continue
+        fi
+        
+        if [ ! -e "$device_path" ]; then
             echo "INVALID_PATH:$device_path" >> "$temp_validation"
+            debug "Device path does not exist: $device_path"
             continue
         fi
         
@@ -895,6 +1327,7 @@ atomic_pre_flight_validation() {
         snapshot_path="${device_path}-snapshot-${snapshotname}"
         if lvs "${snapshot_path}" >/dev/null 2>&1; then
             echo "EXISTS:$snapshot_path" >> "$temp_validation"
+            debug "Snapshot already exists: $snapshot_path"
             continue
         fi
         
@@ -903,11 +1336,13 @@ atomic_pre_flight_validation() {
             vg_name=$(lvs --noheadings -o vg_name "$device_path" 2>/dev/null | tr -d ' ')
             if [ -n "$vg_name" ]; then
                 free_space=$(vgs --noheadings -o vg_free --units g "$vg_name" 2>/dev/null | tr -d ' ' | sed 's/g//')
-                config_size=$(echo "$line" | grep -oP 'size=\K[^,]+' || echo "10G")
-                required_gb=$(echo "$config_size" | sed 's/[^0-9]//g')
+                # Use intelligent sizing for validation
+                required_size=$(calculate_universal_optimal_size "$device_path" "$id" "$is_container")
+                required_gb=$(echo "$required_size" | sed 's/G$//')
                 
                 if [ "$(echo "$free_space < $required_gb" | bc 2>/dev/null || echo "0")" = "1" ]; then
                     echo "NOSPACE:$vg_name:${free_space}G<${required_gb}G" >> "$temp_validation"
+                    debug "Insufficient space: $vg_name"
                     continue
                 fi
             fi
@@ -916,14 +1351,31 @@ atomic_pre_flight_validation() {
         # Validate LVM subsystem is responsive
         if ! timeout 2 lvs "$device_path" >/dev/null 2>&1; then
             echo "TIMEOUT:$device_path" >> "$temp_validation"
+            debug "LVM timeout for: $device_path"
             continue
         fi
         
         echo "VALID:$device_path" >> "$temp_validation"
+        debug "Validation passed for: $device_path"
     done
     
     # Check validation results
     if [ -f "$temp_validation" ]; then
+        total_lines=$(wc -l < "$temp_validation")
+        valid_lines=$(grep -c "^VALID:" "$temp_validation" 2>/dev/null || echo "0")
+        
+        debug "Validation results: $valid_lines valid out of $total_lines total"
+        
+        if [ "$valid_lines" -eq 0 ]; then
+            echo "❌ No valid disks found for instance $id"
+            if [ -s "$temp_validation" ]; then
+                echo "Validation details:"
+                cat "$temp_validation"
+            fi
+            rm -f "$temp_validation"
+            return 1
+        fi
+        
         if grep -qv "^VALID:" "$temp_validation"; then
             echo "❌ Validation failures:"
             grep -v "^VALID:" "$temp_validation" | while IFS=: read -r error details; do
@@ -969,28 +1421,32 @@ create_transaction_context() {
     echo "$transaction_id"
 }
 
-# Phase 2: COW Snapshots (Zero downtime)
-create_cow_snapshots_atomic() {
+# Universal COW snapshots creation with intelligent sizing
+create_cow_snapshots_atomic_universal() {
     local transaction_id="$1"
     local id="$2"
     local is_container="$3"
     
-    echo "🔄 Phase 2: Creating COW snapshots (0ms downtime)..."
+    echo "🔄 Phase 2: Creating intelligently-sized COW snapshots (0ms downtime)..."
     start_cow=$(date +%s.%N)
     
     transaction_dir="/tmp/$transaction_id"
     snapshotname=$(cat "$transaction_dir/snapshot_name")
     
+    echo "  🧠 Analyzing storage and optimizing sizes..."
+    
     # Get disks
     disks=$(instance_list_disks_fast "$id" "$is_container")
     echo "$disks" > "$transaction_dir/disk_list"
     
-    # Create snapshots WITHOUT freezing VM (COW is instant)
+    # Build optimized snapshot commands
     snapshot_commands="$transaction_dir/commands"
     created_snapshots="$transaction_dir/created"
+    size_info="$transaction_dir/sizes"
     
     > "$snapshot_commands"
     > "$created_snapshots"
+    > "$size_info"
     
     echo "$disks" | while IFS= read -r line; do
         if [ -z "$line" ]; then continue; fi
@@ -1004,25 +1460,44 @@ create_cow_snapshots_atomic() {
         is_thin=$(is_thin_lv "$device_path")
         
         if [ "$is_thin" = "true" ]; then
-            # Thin snapshots are instant COW
+            # Thin snapshots
             echo "lvcreate -s -n $(basename ${snapshot_path}) $device_path" >> "$snapshot_commands"
+            echo "$(basename $device_path)|thin|dynamic" >> "$size_info"
         else
-            # Regular LVM with calculated size
-            config_size=$(echo "$line" | grep -oP 'size=\K[^,]+' || echo "10G")
-            size_num=$(echo "$config_size" | sed 's/[^0-9]//g')
-            snapshot_size="${size_num}G"
-            echo "lvcreate -L $snapshot_size -s -n $(basename ${snapshot_path}) $device_path" >> "$snapshot_commands"
+            # Calculate intelligent optimal size
+            optimal_size=$(calculate_universal_optimal_size "$device_path" "$id" "$is_container")
+            
+            echo "lvcreate -L $optimal_size -s -n $(basename ${snapshot_path}) $device_path" >> "$snapshot_commands"
+            echo "$(basename $device_path)|regular|$optimal_size" >> "$size_info"
         fi
         
         echo "$snapshot_path" >> "$created_snapshots"
     done
     
-    # Execute all commands atomically with parallel execution
+    # Show optimization summary
+    echo "  📊 Size optimization summary:"
+    total_allocated=0
+    while IFS='|' read -r disk_name type size; do
+        if [ "$type" = "thin" ]; then
+            echo "    📦 $disk_name: Thin (dynamic allocation)"
+        else
+            echo "    💾 $disk_name: $size (intelligently optimized)"
+            size_gb=$(echo "$size" | sed 's/G$//')
+            if [ -n "$size_gb" ]; then
+                total_allocated=$(echo "$total_allocated + $size_gb" | bc)
+            fi
+        fi
+    done < "$size_info"
+    
+    if [ "$(echo "$total_allocated > 0" | bc)" = "1" ]; then
+        echo "  📈 Total allocated: ${total_allocated}G (minimally optimized)"
+    fi
+    
+    # Execute with appropriate parallelism
     commands_executed=0
     total_commands=$(wc -l < "$snapshot_commands")
     max_parallel=$(nproc 2>/dev/null || echo "4")
     
-    # Use parallel execution for COW creation
     job_count=0
     while IFS= read -r cmd; do
         if [ -z "$cmd" ]; then continue; fi
@@ -1038,14 +1513,13 @@ create_cow_snapshots_atomic() {
         
         job_count=$((job_count + 1))
         
-        # Limit parallel jobs
         if [ "$job_count" -ge "$max_parallel" ]; then
             wait
             job_count=0
         fi
     done < "$snapshot_commands"
     
-    wait  # Wait for all COW operations
+    wait
     
     # Check results
     for i in $(seq 0 $((total_commands - 1))); do
@@ -1062,7 +1536,7 @@ create_cow_snapshots_atomic() {
     cow_time=$(echo "($end_cow - $start_cow) * 1000" | bc)
     
     if [ "$commands_executed" -eq "$total_commands" ]; then
-        echo "✅ All COW snapshots created ($commands_executed/$total_commands) in ${cow_time}ms"
+        echo "✅ All intelligent COW snapshots created ($commands_executed/$total_commands) in ${cow_time}ms"
         echo "SNAPSHOTS_CREATED" > "$transaction_dir/status"
         return 0
     else
@@ -1200,7 +1674,7 @@ cleanup_transaction() {
 }
 
 # Best Effort ATOMIC SNAPSHOT CREATION - Main Function
-instance_snapshot_create_true_atomic() {
+instance_snapshot_create_best_effort_atomic() {
     local id="$1"
     local snapshotname="$2"
     local is_container="$3"
@@ -1210,29 +1684,29 @@ instance_snapshot_create_true_atomic() {
         instance_type="Container"
     fi
     
-    echo "🔬 Creating best effort atomic snapshot '$snapshotname' for $instance_type $id..."
+    echo "🔬 Creating best effort atomic snapshot with intelligent sizing for $instance_type $id..."
     start_time=$(date +%s.%N)
     
-    # Phase 0: Pre-flight validation (no locks, no downtime)
+    # Phase 0: Pre-flight validation
     if ! atomic_pre_flight_validation "$id" "$snapshotname" "$is_container"; then
         echo "❌ Pre-flight validation failed"
         return 1
     fi
     
-    # Phase 1: Prepare atomic transaction
+    # Phase 1: Transaction context
     transaction_id=$(create_transaction_context "$id" "$snapshotname")
     if [ -z "$transaction_id" ]; then
         echo "❌ Failed to create transaction context"
         return 1
     fi
     
-    # Phase 2: Create COW snapshots (ZERO downtime)
-    if ! create_cow_snapshots_atomic "$transaction_id" "$id" "$is_container"; then
+    # Phase 2: Intelligent COW snapshots
+    if ! create_cow_snapshots_atomic_universal "$transaction_id" "$id" "$is_container"; then
         cleanup_transaction "$transaction_id"
         return 1
     fi
     
-    # Phase 3: Atomic commit (microsecond downtime)
+    # Phase 3: Best-effort atomic commit
     if ! atomic_commit_transaction "$transaction_id" "$id" "$is_container"; then
         atomic_rollback_transaction "$transaction_id"
         cleanup_transaction "$transaction_id"
@@ -1243,10 +1717,11 @@ instance_snapshot_create_true_atomic() {
     total_time=$(echo "($end_time - $start_time) * 1000" | bc)
     
     echo ""
-    echo "🚀 BEST EFFORT atomic snapshot '$snapshotname' completed in ${total_time}ms"
+    echo "🚀 Best-effort atomic snapshot with intelligent sizing completed in ${total_time}ms"
     echo "   ⚡ Actual downtime: <100 microseconds"
-    echo "   🔒 Atomic guarantee: ALL or NOTHING"
-    echo "   Use './snapshot.sh list $id' to see created snapshots"
+    echo "   🔒 Best-effort atomicity: Coordinated creation with rollback capability"
+    echo "   🧠 Intelligent sizing: Storage-aware optimization"
+    echo "   💾 Space efficient: Optimized for actual usage patterns"
     
     cleanup_transaction "$transaction_id"
     return 0
@@ -1289,18 +1764,110 @@ test_atomic_consistency() {
     fi
 }
 
-# create a snapshot of a disk (enhanced for both thick and thin LVM)
+# Enhanced intelligent snapshot creation
+vm_disk_snapshot_create_intelligent() {
+    local diskpath="$1"
+    local snapshotname="$2"
+    local vm_id="$3"
+    local is_container="$4"
+    local timestamp="$5"
+    
+    debug "Creating intelligently-sized snapshot: $diskpath -> $snapshotname"
+    
+    if [ -z "$diskpath" ] || [ -z "$snapshotname" ]; then
+        echo "Usage: vm_disk_snapshot_create_intelligent <diskpath> <snapshotname> <vm_id> <is_container> [<timestamp>]"
+        return 1
+    fi
+    
+    if [ ! -e "$diskpath" ]; then
+        echo "ERROR: disk path '$diskpath' does not exist."
+        return 1
+    fi
+    
+    snapshot_path="${diskpath}-snapshot-${snapshotname}"
+    is_thin=$(is_thin_lv "$diskpath")
+    
+    echo "🧠 Creating intelligently-sized snapshot for $(basename $diskpath)..."
+    
+    if [ "$is_thin" = "true" ]; then
+        echo "  📦 Thin volume detected - using dynamic allocation"
+        echo "  🚀 Creating thin snapshot (auto-extends as needed)..."
+        
+        # Create thin snapshot
+        lvcreate -s -n "$(basename ${snapshot_path})" "$diskpath"
+        
+    else
+        echo "  💾 Regular volume detected - calculating optimal size"
+        
+        # Calculate optimal size
+        calculated_size=$(calculate_universal_optimal_size "$diskpath" "$vm_id" "$is_container")
+        
+        echo "  📊 Calculated optimal size: $calculated_size"
+        
+        # Verify VG space
+        vg_name=$(lvs --noheadings -o vg_name "$diskpath" 2>/dev/null | tr -d ' ')
+        if [ -n "$vg_name" ]; then
+            free_space=$(vgs --noheadings -o vg_free --units g "$vg_name" 2>/dev/null | tr -d ' ' | sed 's/g//')
+            required_gb=$(echo "$calculated_size" | sed 's/G$//')
+            
+            echo "  💽 VG $vg_name: ${free_space}G available, ${required_gb}G required"
+            
+            if [ "$(echo "$free_space < $required_gb" | bc)" = "1" ]; then
+                echo "  ⚠️  Adjusting for available space..."
+                adjusted_size=$(echo "scale=0; $free_space * 0.85" | bc)
+                if [ "$adjusted_size" -lt 1 ]; then
+                    adjusted_size=1
+                fi
+                calculated_size="${adjusted_size}G"
+                echo "  📉 Adjusted to: $calculated_size"
+            fi
+        fi
+        
+        echo "  🚀 Creating optimized snapshot..."
+        lvcreate -L "$calculated_size" -s -n "$(basename ${snapshot_path})" "$diskpath"
+    fi
+    
+    if [ $? -eq 0 ]; then
+        echo "  ✅ Intelligent snapshot created: ${snapshot_path}"
+        
+        # Save metadata
+        if [ -n "$timestamp" ]; then
+            metadata_dir="/etc/pve/snapshot-metadata"
+            mkdir -p "$metadata_dir" 2>/dev/null
+            metadata_file="${metadata_dir}/$(basename ${snapshot_path}).meta"
+            
+            echo "timestamp=$timestamp" > "$metadata_file"
+            echo "optimized_size=$calculated_size" >> "$metadata_file"
+            echo "optimization_type=universal" >> "$metadata_file"
+            echo "is_thin=$is_thin" >> "$metadata_file"
+            
+            debug "Saved optimization metadata to $metadata_file"
+        fi
+        
+        echo "  📋 Snapshot details:"
+        lvs "${snapshot_path}" 2>/dev/null | grep "$(basename ${snapshot_path})" || echo "     Created successfully"
+        
+        return 0
+    else
+        echo "  ❌ Snapshot creation failed"
+        return 1
+    fi
+}
+
+# create a snapshot of a disk (enhanced for both thick and thin LVM with intelligent sizing)
 vm_disk_snapshot_create() {
     local diskpath="$1"
     local snapshotname="$2"
     local snapshotsize="$3"
     local timestamp="$4"
+    local vm_id="$5"
+    local is_container="$6"
     
     debug "Creating disk snapshot: $diskpath -> $snapshotname (size: $snapshotsize, timestamp: $timestamp)"
     
     # parameters check
     if [ -z "$diskpath" ] || [ -z "$snapshotname" ]; then
-        echo "Usage: vm_disk_snapshot_create <diskpath> <snapshotname> [<snapshotsize>] [<timestamp>]"
+        echo "Usage: vm_disk_snapshot_create <diskpath> <snapshotname> [<snapshotsize>] [<timestamp>] [<vm_id>] [<is_container>]"
         return 1
     fi
 
@@ -1311,7 +1878,13 @@ vm_disk_snapshot_create() {
         return 1
     fi
     
-    # Detect if this is a thin LV
+    # Use intelligent sizing if enabled and vm_id provided
+    if [ "$UNIVERSAL_SIZING" = "true" ] && [ -n "$vm_id" ]; then
+        vm_disk_snapshot_create_intelligent "$diskpath" "$snapshotname" "$vm_id" "$is_container" "$timestamp"
+        return $?
+    fi
+    
+    # Fallback to original logic with minimal sizing
     is_thin=$(is_thin_lv "$diskpath")
     snapshot_path="${diskpath}-snapshot-${snapshotname}"
     
@@ -1342,15 +1915,24 @@ vm_disk_snapshot_create() {
             return 1
         fi
     else
-        # Regular LVM snapshot - size specification required
+        # Regular LVM snapshot - use minimal intelligent size if no size provided
+        if [ -z "$snapshotsize" ]; then
+            # Calculate minimal snapshot size (10% of original or 2GB minimum)
+            original_size=$(lvs --noheadings -o lv_size --units g "$diskpath" 2>/dev/null | tr -d ' ' | sed 's/g//')
+            if [ -n "$original_size" ]; then
+                minimal_size=$(echo "scale=0; $original_size * 0.1" | bc)
+                if [ "$(echo "$minimal_size < 2" | bc)" = "1" ]; then
+                    minimal_size=2
+                fi
+                snapshotsize="${minimal_size}G"
+            else
+                snapshotsize="2G"  # Absolute fallback
+            fi
+            echo "Using minimal calculated size: $snapshotsize"
+        fi
+        
         echo "Creating regular LVM snapshot with size: $snapshotsize"
         debug "Using regular LVM snapshot creation with size: $snapshotsize"
-        
-        if [ -z "$snapshotsize" ]; then
-            echo "ERROR: Snapshot size required for regular LVM"
-            debug "No snapshot size provided for regular LVM"
-            return 1
-        fi
         
         # Check VG space for regular LVM
         vg_name=$(lvs --noheadings -o vg_name "$diskpath" 2>/dev/null | tr -d ' ')
@@ -1439,6 +2021,13 @@ vm_disk_snapshot_delete() {
             debug "Removed metadata file: $metadata_file"
         fi
         
+        # Remove optimization metadata if it exists
+        meta_file="/etc/pve/snapshot-metadata/$(basename ${snapshot_path}).meta"
+        if [ -f "$meta_file" ]; then
+            rm -f "$meta_file"
+            debug "Removed optimization metadata file: $meta_file"
+        fi
+        
         return 0
     else
         echo "  ✗ Failed to delete snapshot: $(basename $snapshot_path)"
@@ -1491,11 +2080,20 @@ vm_disk_snapshot_copy() {
         debug "Creating thin snapshot copy"
         lvcreate -s -n "$(basename ${temp_snapshot})" "$diskpath"
     else
-        # Create regular snapshot with specified size
+        # Create regular snapshot with minimal intelligent size
         if [ -z "$snapsize" ]; then
-            echo "ERROR: Snapshot size required for regular LVM copy"
-            debug "No snapshot size provided for regular LVM copy"
-            return 1
+            # Use minimal size for copy
+            original_size=$(lvs --noheadings -o lv_size --units g "$diskpath" 2>/dev/null | tr -d ' ' | sed 's/g//')
+            if [ -n "$original_size" ]; then
+                copy_size=$(echo "scale=0; $original_size * 0.1" | bc)
+                if [ "$(echo "$copy_size < 2" | bc)" = "1" ]; then
+                    copy_size=2
+                fi
+                snapsize="${copy_size}G"
+            else
+                snapsize="2G"
+            fi
+            echo "Using minimal calculated copy size: $snapsize"
         fi
         debug "Creating regular snapshot copy with size: $snapsize"
         lvcreate -L "$snapsize" -s -n "$(basename ${temp_snapshot})" "$diskpath"
@@ -1626,15 +2224,18 @@ recreate_snapshots() {
             debug "Creating new thin snapshot: ${diskpath##*/}-snapshot-${snapshotname}"
             lvcreate -s -n "${diskpath##*/}-snapshot-${snapshotname}" "$diskpath"
         else
-            # Get size of temp snapshot and create regular snapshot
-            snap_info=$(lvs --noheadings -o lv_size --units m "${diskpath}-snapshot-${tempname}" 2>/dev/null)
-            if [ -z "$snap_info" ]; then
-                echo "WARNING: Could not determine temp snapshot size, using default"
-                debug "Could not determine temp snapshot size"
-                snap_info="1000M"
+            # Use minimal size for recreated snapshot
+            original_size=$(lvs --noheadings -o lv_size --units g "$diskpath" 2>/dev/null | tr -d ' ' | sed 's/g//')
+            if [ -n "$original_size" ]; then
+                snap_size=$(echo "scale=0; $original_size * 0.1" | bc)
+                if [ "$(echo "$snap_size < 2" | bc)" = "1" ]; then
+                    snap_size=2
+                fi
+                snap_size="${snap_size}G"
+            else
+                snap_size="2G"
             fi
-            snap_size=$(echo "$snap_info" | tr -d ' ')
-            debug "Creating regular snapshot with size: $snap_size"
+            debug "Creating regular snapshot with minimal size: $snap_size"
             
             lvcreate -L "${snap_size}" -s -n "${diskpath##*/}-snapshot-${snapshotname}" "$diskpath"
         fi
@@ -1688,21 +2289,21 @@ check_snapshot_status() {
     return 1  # No longer merging
 }
 
-# Ultra-fast disk listing with improved caching and fallback
+# Ultra-fast disk listing with improved caching and fallback - WORKING VERSION
 instance_list_disks_fast() {
     local id="$1"
     local is_container="$2"
     
     debug "Fast listing disks for instance: $id (container: $is_container)"
     
-    # Use cached disk list if available (30 seconds cache - shorter for better reliability)
+    # Use cached disk list if available
     cache_file="/tmp/disks_cache_$id"
     if [ -f "$cache_file" ] && [ "$(find "$cache_file" -mmin -0.5 2>/dev/null)" ]; then
         cached_content=$(cat "$cache_file" 2>/dev/null)
         if [ -n "$cached_content" ]; then
             debug "Using cached disk list for $id"
             echo "$cached_content"
-            return
+            return 0
         else
             debug "Cache file empty, removing: $cache_file"
             rm -f "$cache_file"
@@ -1730,11 +2331,11 @@ instance_list_disks_fast() {
     if [ "$is_container" = "true" ]; then
         # For containers, look for rootfs and mp (mount points)
         disks=$(echo "$config_output" | grep -E '^rootfs:|^mp[0-9]+:' | grep -v 'local:')
-        debug "Container disks found: $(echo "$disks" | wc -l) lines"
+        debug "Container disks found: $(echo "$disks" | grep -c . 2>/dev/null || echo 0)"
     else
         # For VMs, look for virtio, sata, scsi, ide
         disks=$(echo "$config_output" | grep -E '^virtio[0-9]+:|^sata[0-9]+:|^scsi[0-9]+:|^ide[0-9]+:' | grep -v 'local:')
-        debug "VM disks found: $(echo "$disks" | wc -l) lines"
+        debug "VM disks found: $(echo "$disks" | grep -c . 2>/dev/null || echo 0)"
     fi
 
     if [ -z "$disks" ]; then
@@ -1742,77 +2343,139 @@ instance_list_disks_fast() {
         return 1
     fi
 
-    # Parse each line containing disk and add LVM path
-    result=""
-    echo "$disks" | while IFS= read -r line; do
-        if [ -z "$line" ]; then
-            continue
-        fi
+    # Parse each line containing disk and add LVM path - COMPATIBLE VERSION
+temp_result_file="/tmp/disk_parse_$$"
+temp_disks_file="/tmp/disks_input_$$"
+> "$temp_result_file"
+
+# Write disks to temporary file to avoid subshell issues
+echo "$disks" > "$temp_disks_file"
+
+# Read from file instead of pipe to avoid subshell
+while IFS= read -r line; do
+    if [ -z "$line" ]; then
+        continue
+    fi
+    
+    debug "Processing disk line: $line"
+    
+    # Extract disk info with improved parsing
+    disk_name=""
+    if [ "$is_container" = "true" ]; then
+        disk_name=$(echo "$line" | sed 's/^[^:]*:[[:space:]]*//' | cut -d ',' -f 1)
+    else
+        disk_name=$(echo "$line" | sed 's/^[^:]*:[[:space:]]*//' | cut -d ',' -f 1)
+    fi
+    
+    debug "Extracted disk name: '$disk_name'"
+    
+    # Extract part after ':' in disk_name
+    if echo "$disk_name" | grep -q ':'; then
+        disk_basename=$(echo "$disk_name" | cut -d ':' -f 2)
+    else
+        debug "WARNING: No ':' found in disk_name '$disk_name', skipping"
+        continue
+    fi
+    
+    debug "Disk basename: '$disk_basename'"
+    
+    # Skip if disk_basename is empty or invalid
+    if [ -z "$disk_basename" ] || [ "$disk_basename" = "local" ]; then
+        debug "WARNING: Empty or local disk basename '$disk_basename', skipping"
+        continue
+    fi
+    
+    # SIMPLE AND BULLETPROOF LVM path discovery
+    lvm_path=""
+
+    debug "Simple LVM path discovery for '$disk_basename'"
+
+    # Method 1: Try all VGs with this LV name
+    for vg in $(vgs --noheadings -o vg_name 2>/dev/null | tr -d ' '); do
+        test_path="/dev/${vg}/${disk_basename}"
+        debug "  Testing: $test_path"
         
-        debug "Processing disk line: $line"
-        
-        # Extract disk info quickly
-        if [ "$is_container" = "true" ]; then
-            disk_name=$(echo "$line" | cut -d ' ' -f 2 | cut -d ',' -f 1)
-        else
-            disk_name=$(echo "$line" | cut -d ' ' -f 2 | cut -d ',' -f 1)
-        fi
-        
-        debug "Disk name: $disk_name"
-        
-        # Extract part after ':' in disk_name
-        disk_basename=$(echo "$disk_name" | cut -d ':' -f 2)    
-        debug "Disk basename: $disk_basename"
-        
-        # Fast LVM path lookup with multiple methods
-        lvm_path=""
-        
-        # Method 1: Direct device mapper lookup (fastest)
-        if [ -e "/dev/mapper/$disk_basename" ]; then
-            lvm_path="/dev/mapper/$disk_basename"
-            debug "Found via mapper: $lvm_path"
-        # Method 2: Check common device paths
-        elif [ -e "/dev/pve/$disk_basename" ]; then
-            lvm_path="/dev/pve/$disk_basename"
-            debug "Found via pve: $lvm_path"
-        # Method 3: Direct LVM path construction
-        elif lvs "$disk_basename" >/dev/null 2>&1; then
-            # Try to construct path from LVM info
-            vg_name=$(lvs --noheadings -o vg_name "$disk_basename" 2>/dev/null | tr -d ' ')
-            if [ -n "$vg_name" ]; then
-                lvm_path="/dev/${vg_name}/${disk_basename}"
-                debug "Constructed path: $lvm_path"
+        # ADD EXTRA VERIFICATION
+        if [ -e "$test_path" ]; then
+            # Double-check it's actually a block device
+            if [ -b "$test_path" ] || [ -L "$test_path" ]; then
+                lvm_path="$test_path"
+                debug "  ✓ Found valid path: $lvm_path"
+                break
+            else
+                debug "  ~ Path exists but not block device: $test_path"
             fi
-        # Method 4: Fast find with limited depth as last resort
         else
-            lvm_path=$(find /dev -maxdepth 3 -name "$disk_basename" -type l -print -quit 2>/dev/null)
-            debug "Found via find: $lvm_path"
+            debug "  ✗ Path does not exist: $test_path"
         fi
+    done
+
+    # Method 2: If not found, try device mapper
+    if [ -z "$lvm_path" ]; then
+        debug "Trying device mapper alternatives"
         
-        if [ -n "$lvm_path" ] && [ -e "$lvm_path" ]; then
-            echo "$line,$disk_basename,$lvm_path"
-        else
-            debug "WARNING: Could not find LVM path for $disk_basename"
-            # Still include it in case it can be resolved later
-            echo "$line,$disk_basename,"
+        for vg in $(vgs --noheadings -o vg_name 2>/dev/null | tr -d ' '); do
+            test_path="/dev/mapper/${vg}-${disk_basename}"
+            debug "  Testing: $test_path"
+            
+            if [ -e "$test_path" ] && ([ -b "$test_path" ] || [ -L "$test_path" ]); then
+                lvm_path="$test_path"
+                debug "  ✓ Found: $lvm_path"
+                break
+            fi
+        done
+    fi
+
+    # Method 3: Direct path construction with known working format
+    if [ -z "$lvm_path" ]; then
+        debug "Trying direct construction based on config"
+        
+        # Extract VG from config line if possible
+        config_vg=$(echo "$disk_name" | cut -d ':' -f 1)
+        if [ -n "$config_vg" ]; then
+            direct_path="/dev/${config_vg}/${disk_basename}"
+            debug "  Testing direct path: $direct_path"
+            
+            if [ -e "$direct_path" ] && ([ -b "$direct_path" ] || [ -L "$direct_path" ]); then
+                lvm_path="$direct_path"
+                debug "  ✓ Found via direct construction: $lvm_path"
+            fi
         fi
-    done > "/tmp/disk_parse_$$"
+    fi
+
+    # Verify and add result
+    if [ -n "$lvm_path" ] && [ -e "$lvm_path" ]; then
+        echo "$line,$disk_basename,$lvm_path" >> "$temp_result_file"
+        debug "Successfully added: $disk_basename -> $lvm_path"
+    else
+        debug "ERROR: Could not find path for '$disk_basename'"
+        debug "Manual verification:"
+        if [ -e "/dev/DESOG_VOL34_PROXMOX/${disk_basename}" ]; then
+            debug "  Manual check shows path exists: /dev/DESOG_VOL34_PROXMOX/${disk_basename}"
+        fi
+    fi
+
+done < "$temp_disks_file"
+
+# Clean up temporary files
+rm -f "$temp_disks_file"
     
     # Read results and cache them
-    result=$(cat "/tmp/disk_parse_$$" 2>/dev/null)
-    rm -f "/tmp/disk_parse_$$"
+    result=$(cat "$temp_result_file" 2>/dev/null)
+    rm -f "$temp_result_file"
     
     if [ -n "$result" ]; then
-        debug "Caching disk list for $id"
+        debug "Successfully parsed $(echo "$result" | wc -l) disks, caching for $id"
         echo "$result" | tee "$cache_file"
+        return 0
     else
-        debug "No valid disk results found"
+        debug "No valid disk results found for $id"
         rm -f "$cache_file"
         return 1
     fi
 }
 
-# Fallback to standard disk listing without cache
+# Fallback to standard disk listing without cache - IMPROVED
 instance_list_disks_no_cache() {
     local id="$1"
     local is_container="$2"
@@ -1838,11 +2501,11 @@ instance_list_disks_no_cache() {
     if [ "$is_container" = "true" ]; then
         # For containers, look for rootfs and mp (mount points)
         disks=$(echo "$config_output" | grep -E '^rootfs:|^mp[0-9]+:' | grep -v 'local:')
-        debug "Container disks found: $(echo "$disks" | wc -l) lines"
+        debug "Container disks found: $(echo "$disks" | grep -c .)"
     else
         # For VMs, look for virtio, sata, scsi, ide
         disks=$(echo "$config_output" | grep -E '^virtio[0-9]+:|^sata[0-9]+:|^scsi[0-9]+:|^ide[0-9]+:' | grep -v 'local:')
-        debug "VM disks found: $(echo "$disks" | wc -l) lines"
+        debug "VM disks found: $(echo "$disks" | grep -c .)"
     fi
 
     if [ -z "$disks" ]; then
@@ -1850,7 +2513,7 @@ instance_list_disks_no_cache() {
         return 1
     fi
 
-    # parse each line containing disk and add lvm path
+    # parse each line containing disk and add lvm path - ROBUST VERSION
     echo "$disks" | while IFS= read -r line; do
         if [ -z "$line" ]; then
             continue
@@ -1858,40 +2521,74 @@ instance_list_disks_no_cache() {
         
         debug "Processing disk line: $line"
         
-        # extract disk name (field after ':')
+        # extract disk name (field after ':') - IMPROVED PARSING
         disk_name=""
         if [ "$is_container" = "true" ]; then
             # For containers: rootfs: pve:vm-101-disk-0,size=8G
-            # or mp0: pve:vm-101-disk-1,mp=/data,size=10G
-            disk_name=$(echo "$line" | cut -d ' ' -f 2 | cut -d ',' -f 1)
+            disk_name=$(echo "$line" | sed 's/^[^:]*:[[:space:]]*//' | cut -d ',' -f 1)
         else
             # For VMs: virtio0: pve:vm-104-disk-1,size=32G
-            disk_name=$(echo "$line" | cut -d ' ' -f 2 | cut -d ',' -f 1)
+            disk_name=$(echo "$line" | sed 's/^[^:]*:[[:space:]]*//' | cut -d ',' -f 1)
         fi
         
         debug "Disk name: $disk_name"
         
         # extract part after ':' in disk_name
-        disk_basename=$(echo "$disk_name" | cut -d ':' -f 2)    
-        debug "Disk basename: $disk_basename"
-        
-        # get source path (real target) of symbolic link
-        lvm_path=""
-        
-        # Try multiple methods to find the LVM path
-        if [ -e "/dev/mapper/$disk_basename" ]; then
-            lvm_path="/dev/mapper/$disk_basename"
-        elif [ -e "/dev/pve/$disk_basename" ]; then
-            lvm_path="/dev/pve/$disk_basename"
+        if echo "$disk_name" | grep -q ':'; then
+            disk_basename=$(echo "$disk_name" | cut -d ':' -f 2)
         else
-            lvm_path=$(find /dev -name "$disk_basename" -type l -exec ls -f {} + 2>/dev/null | head -1)
+            debug "No ':' in disk_name, skipping: $disk_name"
+            continue
         fi
         
-        debug "LVM path: $lvm_path"
+        debug "Disk basename: $disk_basename"
+        
+        # Skip if empty or local
+        if [ -z "$disk_basename" ] || [ "$disk_basename" = "local" ]; then
+            debug "Skipping empty or local basename: $disk_basename"
+            continue
+        fi
+        
+        # ROBUST path finding - use the same method as the fast function
+        lvm_path=""
+        
+        # Use lvs to find the correct VG and construct path
+        lv_info=$(lvs --noheadings -o vg_name,lv_name --separator=: 2>/dev/null | grep ":$disk_basename$")
+        
+        if [ -n "$lv_info" ]; then
+            vg_name=$(echo "$lv_info" | cut -d: -f1 | tr -d ' ')
+            lv_name=$(echo "$lv_info" | cut -d: -f2 | tr -d ' ')
+            
+            debug "Found LV: VG=$vg_name, LV=$lv_name"
+            
+            # Try standard paths
+            for test_path in "/dev/${vg_name}/${lv_name}" "/dev/mapper/${vg_name}-${lv_name}"; do
+                if [ -e "$test_path" ]; then
+                    lvm_path="$test_path"
+                    debug "Found path: $lvm_path"
+                    break
+                fi
+            done
+        fi
+        
+        # Fallback: search device mapper
+        if [ -z "$lvm_path" ]; then
+            for dm_path in /dev/mapper/*; do
+                if [ -e "$dm_path" ] && echo "$(basename "$dm_path")" | grep -q "$disk_basename"; then
+                    lvm_path="$dm_path"
+                    debug "Found via device mapper: $lvm_path"
+                    break
+                fi
+            done
+        fi
+        
+        debug "Final LVM path: $lvm_path"
 
-        if [ -n "$lvm_path" ]; then
+        if [ -n "$lvm_path" ] && [ -e "$lvm_path" ]; then
             echo "$line,$disk_basename,$lvm_path"
         else
+            debug "ERROR: Could not find path for $disk_basename"
+            # Still output the line but with empty path for debugging
             echo "$line,$disk_basename,"
         fi
     done
@@ -1982,30 +2679,38 @@ instance_snapshot_create_atomic_fast() {
                 exit 0
             fi
             
-            # Fast size calculation and command building
+            # Fast size calculation and command building with intelligent sizing
             is_thin=$(is_thin_lv "$device_path")
             if [ "$is_thin" = "true" ]; then
                 # Thin snapshot command (fastest)
                 echo "lvcreate -s -n $(basename ${snapshot_path}) $device_path" >> "$temp_commands_file"
                 echo "${snapshot_path}|thin" >> "$temp_validation_file"
             else
-                # Quick size calculation for regular LVM
-                config_size=$(echo "$line" | grep -oP 'size=\K[^,]+' || echo "")
-                if [ -n "$config_size" ]; then
-                    size_num=$(echo "$config_size" | grep -o '[0-9]\+')
-                    # Simplified size calculation (faster) - use smaller percentages for speed
-                    if [ "$size_num" -lt 100 ]; then
-                        snapshot_size="${size_num}G"  # 100% for small disks (faster allocation)
-                    else
-                        # Use 20% for larger disks (faster than calculating exact percentages)
-                        snapshot_size=$(( size_num / 5 ))G
-                    fi
+                # Use intelligent minimal sizing
+                if [ "$UNIVERSAL_SIZING" = "true" ]; then
+                    optimal_size=$(calculate_universal_optimal_size "$device_path" "$id" "$is_container")
                 else
-                    snapshot_size="10G"
+                    # Fallback minimal sizing
+                    config_size=$(echo "$line" | grep -oP 'size=\K[^,]+' || echo "")
+                    if [ -n "$config_size" ]; then
+                        size_num=$(echo "$config_size" | grep -o '[0-9]\+')
+                        # Use minimal percentage (5% or 2GB minimum)
+                        if [ "$size_num" -lt 40 ]; then
+                            optimal_size="2G"
+                        else
+                            minimal_size=$(( size_num / 20 ))  # 5% of original size
+                            if [ "$minimal_size" -lt 2 ]; then
+                                minimal_size=2
+                            fi
+                            optimal_size="${minimal_size}G"
+                        fi
+                    else
+                        optimal_size="2G"
+                    fi
                 fi
                 
-                echo "lvcreate -L $snapshot_size -s -n $(basename ${snapshot_path}) $device_path" >> "$temp_commands_file"
-                echo "${snapshot_path}|regular" >> "$temp_validation_file"
+                echo "lvcreate -L $optimal_size -s -n $(basename ${snapshot_path}) $device_path" >> "$temp_commands_file"
+                echo "${snapshot_path}|regular|$optimal_size" >> "$temp_validation_file"
             fi
             
             echo "$(basename $device_path)|$is_thin" >&2
@@ -2020,6 +2725,28 @@ instance_snapshot_create_atomic_fast() {
         cat "$temp_validation_file"
         rm -f "$temp_commands_file" "$temp_validation_file"
         return 1
+    fi
+    
+    # Show size optimization summary
+    if [ -f "$temp_validation_file" ]; then
+        echo "  📊 Size optimization summary:"
+        total_allocated=0
+        while IFS='|' read -r snapshot_path type size; do
+            disk_name=$(basename $(echo "$snapshot_path" | sed 's/-snapshot-.*//'))
+            if [ "$type" = "thin" ]; then
+                echo "    📦 $disk_name: Thin (dynamic allocation)"
+            else
+                echo "    💾 $disk_name: $size (minimally optimized)"
+                size_gb=$(echo "$size" | sed 's/G$//')
+                if [ -n "$size_gb" ]; then
+                    total_allocated=$(echo "$total_allocated + $size_gb" | bc)
+                fi
+            fi
+        done < "$temp_validation_file"
+        
+        if [ "$(echo "$total_allocated > 0" | bc)" = "1" ]; then
+            echo "  📈 Total allocated: ${total_allocated}G (space efficient)"
+        fi
     fi
     
     # Phase 2: Minimal downtime approach
@@ -2066,7 +2793,7 @@ instance_snapshot_create_atomic_fast() {
     fi
     
     # Phase 3: Parallel snapshot execution (FASTEST!)
-    echo "Phase 3: Parallel snapshot creation..."
+    echo "Phase 3: Parallel snapshot creation with intelligent sizing..."
     
     # Execute all snapshot commands in parallel with job control
     max_jobs=$(nproc 2>/dev/null || echo "4")  # Use all available CPU cores
@@ -2147,12 +2874,20 @@ instance_snapshot_create_atomic_fast() {
         echo "Phase 5: Fast metadata..."
         
         # Set metadata in parallel
-        while IFS='|' read -r snapshot_path snap_type; do
+        while IFS='|' read -r snapshot_path snap_type size; do
             if [ -n "$snapshot_path" ]; then
                 (
                     metadata_dir="/etc/pve/snapshot-metadata"
                     mkdir -p "$metadata_dir" 2>/dev/null
                     echo "$snapshot_timestamp" > "${metadata_dir}/$(basename $snapshot_path).time"
+                    
+                    # Save size optimization info
+                    if [ -n "$size" ] && [ "$size" != "" ]; then
+                        meta_file="${metadata_dir}/$(basename $snapshot_path).meta"
+                        echo "optimized_size=$size" > "$meta_file"
+                        echo "optimization_type=minimal" >> "$meta_file"
+                        echo "creation_method=fast_parallel" >> "$meta_file"
+                    fi
                 ) &
             fi
         done < "$temp_validation_file"
@@ -2175,6 +2910,7 @@ instance_snapshot_create_atomic_fast() {
         else
             echo "   ⚡ Downtime: <3 seconds"
         fi
+        echo "   💾 Space efficient: Minimal storage usage"
         echo "   Use './snapshot.sh list $id' to see created snapshots"
     else
         echo ""
@@ -2200,10 +2936,10 @@ instance_snapshot_create() {
     
     # Choose atomic or fast mode
     if [ "$ATOMIC_MODE" = "true" ]; then
-        # Use best effort atomic implementation
-        instance_snapshot_create_true_atomic "$id" "$snapshotname" "$is_container"
+        # Use best effort atomic implementation with intelligent sizing
+        instance_snapshot_create_best_effort_atomic "$id" "$snapshotname" "$is_container"
     else
-        # Use legacy fast parallel implementation
+        # Use legacy fast parallel implementation with intelligent sizing
         instance_snapshot_create_atomic_fast "$id" "$snapshotname" "$is_container"
     fi
 }
@@ -2404,10 +3140,20 @@ instance_revert_to_snapshot() {
             fi
             sleep 5
         fi
-        echo "$instance_type stopped successfully."
-        debug "Instance stopped successfully"
-    fi
+
+		# Additional verification after activation
+		debug "Post-activation verification:"
+		if lvs --noheadings -o vg_name,lv_name 2>/dev/null | grep -q "vm-${id}-"; then
+			debug "LVs found for vm-${id}"
+		else
+			debug "WARNING: Still no LVs found for vm-${id} after activation"
+		fi
+	fi
         
+	# Always activate LVM volumes before disk operations (essential for stopped VMs)
+	echo "Ensuring LVM volumes are activated..."
+	activate_lvm_volumes "$id" "$is_container"
+		
     # get instance disk list using robust method
     echo "Getting disk list for revert operation..."
     disks=$(instance_list_disks "$id" "$is_container")
@@ -2806,6 +3552,8 @@ cleanup() {
     rm -f /tmp/script_compressed_* 2>/dev/null
     rm -f /tmp/atomic_* 2>/dev/null
     rm -f /tmp/cow_result_$$_* 2>/dev/null
+    rm -f /tmp/storage_characteristics_* 2>/dev/null
+    rm -f /tmp/universal_usage_* 2>/dev/null
     
     # Close SSH connections
     for control_socket in /tmp/ssh_control_*; do
@@ -2813,6 +3561,102 @@ cleanup() {
             ssh -O exit -o ControlPath="$control_socket" dummy 2>/dev/null || true
         fi
     done
+}
+
+# Activate LVM volumes for stopped instances - ROBUST VERSION
+activate_lvm_volumes() {
+    local id="$1"
+    local is_container="$2"
+    
+    debug "Activating LVM volumes for instance $id"
+    
+    # Find all LVs for this instance (including snapshots)
+    instance_lvs=$(lvs --noheadings -o vg_name,lv_name --separator=: 2>/dev/null | grep ":vm-${id}-")
+    
+    if [ -n "$instance_lvs" ]; then
+        activated_count=0
+        
+        echo "$instance_lvs" | while IFS=: read -r vg_name lv_name; do
+            vg_name=$(echo "$vg_name" | tr -d ' ')
+            lv_name=$(echo "$lv_name" | tr -d ' ')
+            
+            debug "Processing LV: ${vg_name}/${lv_name}"
+            
+            # Check current state
+            lv_active=$(lvs --noheadings -o lv_active "${vg_name}/${lv_name}" 2>/dev/null | tr -d ' ')
+            debug "  Current state: $lv_active"
+            
+            # Activate if not already active
+            if [ "$lv_active" != "active" ]; then
+                debug "  Activating LV: ${vg_name}/${lv_name}"
+                
+                if lvchange -ay "${vg_name}/${lv_name}" >/dev/null 2>&1; then
+                    debug "  ✓ Activated: ${vg_name}/${lv_name}"
+                    activated_count=$((activated_count + 1))
+                else
+                    debug "  ✗ Failed to activate: ${vg_name}/${lv_name}"
+                    # Try alternative activation method
+                    debug "  Trying alternative activation..."
+                    if lvchange -aay "${vg_name}/${lv_name}" >/dev/null 2>&1; then
+                        debug "  ✓ Alternative activation succeeded: ${vg_name}/${lv_name}"
+                        activated_count=$((activated_count + 1))
+                    else
+                        debug "  ✗ Alternative activation also failed"
+                    fi
+                fi
+            else
+                debug "  Already active: ${vg_name}/${lv_name}"
+                activated_count=$((activated_count + 1))
+            fi
+        done
+        
+        echo "Activated LVM volumes for instance $id"
+        
+        # Wait for device nodes to appear
+        sleep 3
+        
+        # Force udev to create device nodes
+        debug "Triggering udev to create device nodes"
+        udevadm trigger >/dev/null 2>&1 || true
+        udevadm settle >/dev/null 2>&1 || true
+        sleep 1
+        
+        # Verify activation and show results
+        debug "Verifying LVM activation results:"
+        for vg in $(vgs --noheadings -o vg_name 2>/dev/null | tr -d ' '); do
+            for disk_num in 0 1 2 3 4; do  # Check multiple possible disks
+                test_path="/dev/${vg}/vm-${id}-disk-${disk_num}"
+                if [ -e "$test_path" ]; then
+                    debug "  ✓ Available: $test_path"
+                fi
+            done
+        done
+        
+        # Double-check by listing actual device directory
+        debug "Available devices in VG directories:"
+        for vg in $(vgs --noheadings -o vg_name 2>/dev/null | tr -d ' '); do
+            if [ -d "/dev/${vg}" ]; then
+                vm_devices=$(ls "/dev/${vg}/" 2>/dev/null | grep "vm-${id}-" || true)
+                if [ -n "$vm_devices" ]; then
+                    echo "$vm_devices" | while read device; do
+                        debug "  Found: /dev/${vg}/${device}"
+                    done
+                fi
+            fi
+        done
+        
+    else
+        debug "No LVs found for instance $id"
+        echo "WARNING: No LVM volumes found for instance $id"
+        
+        # Show what LVs are available for debugging
+        debug "Available LVs in system:"
+        lvs --noheadings -o vg_name,lv_name 2>/dev/null | while read vg lv; do
+            if echo "$lv" | grep -q "vm-"; then
+                debug "  Available: ${vg}/${lv}"
+            fi
+        done
+    fi
 }
 
 # Set up trap to clean up on exit
@@ -2840,6 +3684,7 @@ cluster_sync="false"
 keep_snapshot=""
 force_vm="false"
 force_container="false"
+size_optimization="true"
 
 # Enhanced parameter parsing with atomic options
 for arg in "$@"; do
@@ -2874,7 +3719,7 @@ for arg in "$@"; do
             ;;
         --atomic)
             ATOMIC_MODE="true"
-            debug "Option: true-atomic mode enabled"
+            debug "Option: atomic mode enabled"
             ;;
         --fast)
             ATOMIC_MODE="false"
@@ -2883,6 +3728,11 @@ for arg in "$@"; do
         --test-atomic)
             TEST_ATOMIC="true"
             debug "Option: test atomic consistency"
+            ;;
+        --no-size-opt)
+            UNIVERSAL_SIZING="false"
+            size_optimization="false"
+            debug "Option: intelligent sizing disabled"
             ;;
         --debug)
             DEBUG_MODE="true"
@@ -2917,7 +3767,7 @@ if ! enhanced_detect_and_proceed "$id" "$force_vm" "$force_container"; then
 fi
 
 debug "Action: $action, ID: $id, Snapshot: $snapshotname, Container: $is_container"
-debug "Options: autostart=$autostart, force_local=$force_local, keep_snapshot=$keep_snapshot, atomic_mode=$ATOMIC_MODE"
+debug "Options: autostart=$autostart, force_local=$force_local, keep_snapshot=$keep_snapshot, atomic_mode=$ATOMIC_MODE, size_opt=$size_optimization"
 
 # Show available instances if not found
 show_available_instances() {
@@ -2971,7 +3821,7 @@ case "$action" in
                 if [ "$is_container" = "true" ]; then
                     instance_type="Container"
                 fi
-                echo "$instance_type $id found locally - executing atomic snapshot creation"
+                echo "$instance_type $id found locally - executing intelligent snapshot creation"
                 debug "Executing locally on $CURRENT_NODE"
                 instance_snapshot_create "$id" "$snapshotname" "$is_container"
                 creation_result=$?
@@ -2980,7 +3830,7 @@ case "$action" in
                 if [ "$is_container" = "true" ]; then
                     instance_type="Container"
                 fi
-                echo "$instance_type $id found on node: $instance_node - executing remotely (atomic)"
+                echo "$instance_type $id found on node: $instance_node - executing remotely (intelligent)"
                 debug "Executing remotely on $instance_node"
                 
                 # Add atomic flag to remote execution
@@ -2996,7 +3846,12 @@ case "$action" in
                     test_flag="--test-atomic"
                 fi
                 
-                execute_remote_snapshot_fast "$instance_node" "create" "$id" "$snapshotname" "$atomic_flag $test_flag"
+                size_flag=""
+                if [ "$size_optimization" = "false" ]; then
+                    size_flag="--no-size-opt"
+                fi
+                
+                execute_remote_snapshot_fast "$instance_node" "create" "$id" "$snapshotname" "$atomic_flag $test_flag $size_flag"
                 creation_result=$?
             fi
         fi
