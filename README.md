@@ -267,6 +267,16 @@ Setup SSH keys for cluster communication:
 🔄 Changelog
 ------------
 
+### 10.06.2025 Changelog
+
+## 🔥 **Smaller Improvement:**
+  - Enables LVM after VM was stopped.
+  - Better Snapshot Sizing
+  - Changed Script to a bash script.
+
+
+***
+
 ### 07.06.2025 Changelog
 
 ## 🔥 **Smaller Improvement:**
